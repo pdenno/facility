@@ -9,25 +9,106 @@
             [ring.util.codec    :refer (url-encode url-decode)]
             [environ.core       :refer (env)]
             [hiccup.core :refer (html)]
-            [clojure.pprint :refer (cl-format pprint)]
+            [cheshire.core]
             [clojure.string :as str]
-            [edu.ucdenver.ccp.kr.kb :refer :all]
-            [edu.ucdenver.ccp.kr.rdf :refer :all]
-            [edu.ucdenver.ccp.kr.sparql :refer :all]
-            [edu.ucdenver.ccp.kr.jena.kb]
-            [cheshire.core])
+            
+            [edu.ucdenver.ccp.kr.kb :as kb]
+            [edu.ucdenver.ccp.kr.rdf :as rdf]
+            [edu.ucdenver.ccp.kr.sparql :as sparql]
+            [edu.ucdenver.ccp.kr.jena.kb :as jena]
+            
+            [tawny.owl :as owl]
+            [tawny.query :as query]
+            [tawny.render]
+            [tawny.read :as rowl]
+            [tawny.lookup :as look]
+
+            [gov.nist.mm.util :refer :all])
+  (:use clojure.java.io)
+  (:import
+   (org.semanticweb.owlapi.model
+    HasIRI
+    OWLAxiom
+    OWLEntity
+    OWLObject
+    OWLOntologyManager OWLOntology IRI
+    OWLClassExpression OWLClass OWLAnnotation
+    OWLDataProperty OWLObjectProperty
+    OWLDataPropertyExpression ; not useful?
+    OWLIndividual OWLDatatype
+    OWLObjectPropertyExpression
+    OWLNamedObject OWLOntologyID)
+   [org.semanticweb.owlapi.search EntitySearcher])
   (:import java.net.URI
            java.io.ByteArrayInputStream)
   (:gen-class))
 
+(def rrr (atom nil))
+
+
+;;; ================= Tawny stuff borrowed from ontolatex ====================
+(def tawny-types [:tawny.owl/class :tawny.owl/individual :tawny.owl/property
+                  :tawny.owl/object-property :tawny.owl/data-property])
+
+(def ontologies "A list of the ontologies used in this project"
+  ["http://modelmeth.nist.gov/ontologies/pizza/pizza.owl"
+   "http://www.linkedmodel.org/schema/dtype"
+   "http://www.linkedmodel.org/schema/vaem"
+   "http://qudt.org/2.0/schema/qudt"
+   "http://modelmeth.nist.gov/modeling"
+   "http://modelmeth.nist.gov/operations"])
+
+;;; POD I expected this to be http://modelmeth.nist.gov/modeling#clojureCodeNote
+(def ^:const code-iri "Used to identify clojure notes from thing-mapped objects."
+  (list :iri "http://modelmeth.nist.gov/modeling#clojureCode"))
+
+(defn read-base-ontos!
+  []
+  (rowl/read :iri "http://www.linkedmodel.org/schema/dtype"
+             :namespace (create-ns 'onto) ; was onto.dtype
+             :location (clojure.java.io/file "resources/dtype.owl"))
+  (rowl/read :iri "http://www.linkedmodel.org/schema/vaem"
+             :namespace (create-ns 'onto) ; was onto.vaem
+             :location (clojure.java.io/file "resources/vaem.owl"))
+  (rowl/read :iri "http://qudt.org/2.0/schema/qudt"
+             :namespace (create-ns 'onto) ; was onto.qudt
+             :location (clojure.java.io/file "resources/SCHEMA_QUDT-v2.0.ttl")))
+
+(defn clear-ontos!
+  "Remove all the ontologies"
+  []
+  (repeatedly
+   5
+   (fn []           
+     (doall (map #(owl/remove-ontology-maybe (OWLOntologyID. (owl/iri %))) ontologies)))))
+
+(defn load-kb
+  "Return a KB object with input loaded."
+  [& files]
+  (let [kb (kb/kb :jena-mem)]
+    (dorun (map #(rdf/load-rdf kb (ByteArrayInputStream. (.getBytes (slurp %))) :turtle) files))
+    (rdf/synch-ns-mappings kb)))
+
+(def mfg-kb (load-kb (clojure.java.io/resource "operations.ttl")
+                     (clojure.java.io/resource "toplevel-taxonomies.ttl")))
+
+
+
+(defn load-kb []
+  (clear-ontos!)
+  (read-base-ontos!)
+  (rowl/read :iri (str "http://modelmeth.nist.gov/" uri-base)
+             :namespace (create-ns (:onto-namespace @+params+)) 
+             :location (clojure.java.io/file onto-file))
+
+
+
+;;; ================= End  ====================
+
+
 ;;; TODO:
 ;;;   DONE - Try to remove package specification for hiccup.
-;;;   DONE - Find Page Design css etc. 
-;;;   DONE - Fix namespaces (gov.nist.mm.facility.core) 
-;;;        - Implement a process (ontology) page
-;;;        - Implement a product (process plan, CAD model) page
-
-;(use 'clojure.repl) ; POD Temporary. For use of doc.
+;;;   DONE - Find Page Design css etc.
 
 ;;; http://stackoverflow.com/questions/3644125/clojure-building-of-url-from-constituent-parts
 (defn make-query-string [m & [encoding]]
@@ -43,16 +124,6 @@
 (defn build-url [url-base query-map & [encoding]]
   (str url-base "?" (make-query-string query-map encoding)))
 
-(defn load-kb
-  "Return a KB object with input loaded."
-  [& files]
-  (let [kb (kb :jena-mem)]
-    (dorun (map #(load-rdf kb (ByteArrayInputStream. (.getBytes (slurp %))) :turtle) files))
-    (synch-ns-mappings kb)))
-
-(def mfg-kb (load-kb (clojure.java.io/resource "manufacturing.ttl")
-                     (clojure.java.io/resource "toplevel-taxonomies.ttl")))
-
 (defn echo
   "Echos the request back as a string."
   [request]
@@ -67,15 +138,17 @@
       (assoc-in response [:headers "Content-Type"] content-type))))
 
 (defn- active-tab 
-  [ & {:keys [tab] :or {tab :process}}]
+  [ & {:keys [tab] :or {tab :system}}]
   "Return HTML div metaltop-teal tabs, marking TAB as active."
   `[:ul
     ~@(map (fn [[k v]]
              (if (= k tab)
                `[:li {:class "active"} [:a {:href ~(str "/FacilitySearch/" (name k))} ~v]]
                `[:li                   [:a {:href ~(str "/FacilitySearch/" (name k))} ~v]]))
-           {:process "Process", :product "Product", :equip "Equipment",
-            :state "System State", :search "Search" :nb "Notebook"})])
+           {:system "Production System",
+            :modeling "Modeling"
+            :concepts "Concepts"
+            :search "Search"})])
 
 ;;; ToDo:
 ;;;   - Add parameters (title, at least. See pod-utils/html-utils)
@@ -113,57 +186,26 @@
 
 ;;; POD Use url-params http://briancarper.net/clojure/compojure-doc.html
 (defn owl-class-url
-  [obj & {:keys [root] :or {root "process/concept"}}]
+  [obj & {:keys [root] :or {root "concepts"}}]
   "Return a URL for an owl:Class."
   `[:a {:href ~(str root "?name=" (url-encode obj))} ~(str (name obj))])
 
-#_(defn- process-pg
+(defn- system-pg
+  "Handle page for system tab."
   [request]
-  "Handle page for process tab."
-  (app-page-wrapper {:tab :process}
-    (let [params (query mfg-kb '((?/x rdfs/subClassOf MachiningProcessParameter)))
-          mchars (query mfg-kb '((?/x rdfs/subClassOf MachineCharacteristic)))
-          params-url (map owl-class-url (map '?/x params))
-          mchars-url (map owl-class-url (map '?/x mchars))
-          [params mchars] (seq-equal-length params-url mchars-url " ")]
-      (html
-      `[:table
-        [:tr [:th "Process Parameters"] [:th "Machine Characteristics"]]
-        ~@(map (fn [d1 d2] [:tr [:td d1] [:td d2]]) params mchars)]))))
-
-(defn- process-pg
-  "Handle page for process tab."
-  [request]
-  (app-page-wrapper {:tab :process}
-    (let [params (query mfg-kb '((?/x rdfs/subClassOf MachiningProcessParameter)))
+  (app-page-wrapper {:tab :system}
+    (let [params (sparql/query mfg-kb '((?/x rdfs/subClassOf Physical)))
           params-url (map owl-class-url (map '?/x params))]
       (html
-        [:h1 "Process Characteristics"]
+        [:h1 "Production System Concepts"]
         `[:ul
           ~@(map (fn [d1] [:li d1]) params-url)]))))
 
-(defn- product-pg
-  "Handle page for product tab."
+(defn- modeling-pg
+  "Handle page for facility modeling tab."
   [request]
-  (app-page-wrapper {:tab :product}
-   "Product: Nothing here yet."))
-
-(defn- equipment-pg
-  "Handle page for equipment tab."
-  [request]
-  (app-page-wrapper {:tab :equip}
-     (let [mchars (query mfg-kb '((?/x rdfs/subClassOf MachineCharacteristic)))
-           mchars-url (map owl-class-url (map '?/x mchars))]
-       (html
-        [:h1 "Equipment Characteristics"]
-        `[:ul
-          ~@(map (fn [d1] [:li d1]) mchars-url)]))))
-
-(defn- state-pg
-  "Handle page for facility state tab."
-  [request]
-  (app-page-wrapper {:tab :state}
-   "State: Nothing here yet."))
+  (app-page-wrapper {:tab :modeling}
+   "Modeling: Nothing here yet."))
 
 (defn- search-pg
   "Handle page for search tab."
@@ -171,40 +213,56 @@
   (app-page-wrapper {:tab :search}
                     "All: Nothing here yet."))
 
-(defn- nb-pg
-  "Handle page for notebook analysis."
-  [request]
-  (app-page-wrapper {:tab :nb}
-   "Notebook: Nothing here yet."))
-
 (defn page-tab
   "Return the keyword indicating the tab on which the page should be displayed."
-  [request & {:keys [default] :or {default :process}}]
+  [request & {:keys [default] :or {default :system}}]
   (if-let [tab (:tab (:params request))]
     (keyword tab)
     default))
 
+(defn lookup-concept
+  "Return a map of everything we know about whatever."
+  [name]
+  :nyi)
+
+#_(defn thing-map
+  "Return a map of information about the class. See also query/into-map-with"
+  ([obj] (thing-map obj {})) ; Used by ignore? 
+  ([obj property-map]
+   (when (instance? OWLClass obj)
+     (let [sname (short-name obj)]
+       (as-> (apply hash-map (tawny.render/as-form obj :keyword true)) ?map
+         (assoc ?map :short-name sname) ; POD (or label)
+         (assoc ?map :var (intern (:onto-namespace @+params+) (symbol sname)))
+         (assoc ?map :notes (simplify-tawny-annotations (:annotation ?map)))
+         (assoc ?map :subclass-of (doall (map short-name ; POD there are other ways. See notes 2017-07-22. 
+                                              (filter #(instance? OWLClass %)
+                                                      (owl/direct-superclasses obj)))))
+         (assoc ?map :properties (properties-of ?map property-map)))))))
+
+
 (defn- concept-desc-pg
   "Describe an owl:Class."
   [request]
-  (app-page-wrapper {:tab (page-tab request)}
-      (str "Got it: params = " (:params request) " query-string = " (url-decode (:query-string request)))))
+  (reset! rrr request)
+  (app-page-wrapper {:tab :concepts #_(page-tab request)}
+                    (str "Got it: params = " (:params request) " "
+                         "query-string = "
+                         (when-let [q (:query-string request)]
+                           (url-decode q)))))
 
 (defroutes routes
-  (GET "/" [] process-pg)
+  (GET "/" [] system-pg)
   (GET "/FacilitySearch/:tab" [tab] 
-       (cond (= tab "process") process-pg
-             (= tab "product") product-pg
-             (= tab "equip"  ) equipment-pg
-             (= tab "state"  ) state-pg
-             (= tab "search" ) search-pg
-             (= tab "nb"     ) nb-pg))
-  (GET "/FacilitySearch/:tab/concept*" [tab] concept-desc-pg) 
+       (cond (= tab "system") system-pg
+             (= tab "modeling"  ) modeling-pg
+             (= tab "concepts") concept-desc-pg
+             (= tab "search" ) search-pg))
+  (GET "/concepts*" [tab] concept-desc-pg) ; POD Hmmm...
   (route/resources "/") ; This one gets used for static pages in resources/public
   (ANY "*" [] echo)) ; Good for diagnostics
 
-;;;  (-main :port 3034)
-;;;  (web/stop (-main :port 3034))
+;;; ============== Server Management ======================================================
 (defn -main [& {:as args}]
   (web/run
     (-> routes
@@ -214,26 +272,11 @@
            args)))
 
 ;;; (Re)start the server
-;(web/stop (-main :port 3034))
-;(-main :port 3034)
+(defn restart []
+ (web/stop (-main :port 3034))
+  (-main :port 3034))
 
-;;;================== PROCESS =======================================================================
-
-;(def nb-content (cheshire.core/parse-stream
-;                 (clojure.java.io/reader "resources/TurningOptimization.ipynb")
-;                 true))
-
-(def nb-test  {:cell_type "markdown",
-               :metadata {},
-               :source
-               ["| Symbol | Variable | Meaning |\n"
-                "|-------------------------------------------------------|\n"
-                "| $D_{LSL}$ | D_LSL | Lower bound on final part diameter|\n"
-                "| $D_{USL}$ | D_USL | Upper bound on final part diameter|\n"
-                "| $R_{USL}$ | R_USL | Maximum allowable surface roughness |\n"
-                "\n"
-                "The paper provides the following values:"]})
-
+;;;================== /FacilitySearch/concepts?name=foo =====================================
 ;;; POD rewrite with reduce
 (defn- table-vals
   [text]
@@ -249,63 +292,3 @@
            (conj rows (butlast (rest (str/split (text line-num) #"\|")))))
           rows)))))
 
-(defn- find-tables
-  "Return those tables from markdown cells of the file that look like they define variables/parameters."
-  [content]
-  (reduce (fn [doc-tabs cell]
-            (let [text (:source cell)
-                  res
-                  (reduce (fn [cell-tabs line]
-                            (if (re-matches
-                                 #"^\s*\|\s*([S,s]ymbol|[P,p]arameter|[V,v]ariable)\s*\|.*\n$"
-                                 line)
-                              (concat cell-tabs (table-vals (subvec text (inc (.indexOf text line)))))
-                              cell-tabs))
-                          [] ; cell-tables (tables in this cell)
-                          text)]
-              (if (empty? res) doc-tabs (conj doc-tabs res))))
-          [] ; document-tables (tables in whole document)
-          (filter #(= (:cell_type %) "markdown") (:cells content))))
-
-#_(defn- find-tables
-  "Return those tables from markdown cells of the file that look like they define variables/parameters."
-  [content]
-  (persistent!
-   (reduce (fn [doc-tabs cell]
-             (let [text (:source cell)
-                   res
-                   (persistent!
-                    (reduce (fn [cell-tabs line]
-                              (if (re-matches
-                                   #"^\s*\|\s* ([S,s]ymbol | [P,p]arameter| [V,v]ariable)\s*\|.*\n$"
-                                   line)
-                                (conj! cell-tabs (table-vals (subvec text (inc (.indexOf text line)))))
-                                cell-tabs))
-                            (transient []) ; cell-tables (tables in this cell)
-                            text))]
-               (if (empty? res) doc-tabs (conj! doc-tabs res))))
-           (transient []) ; document-table (tables in whole document)
-           (filter #(= (:cell_type %) "markdown") (:cells content)))))
-
-            
-
-                        
-         
-;            len (dec (count text))]
-;        (for [line-num 0
-;               tabs tables]
-;          (if (< line-num len)
-;            (if (re-matches
-;                 #"^\s*\|\s* ([S,s]ymbol | [P,p]arameter| [V,v]ariable)\s*\|.*\n$"
-;                 (line-num text))
-;              (recur (inc line-num) (conj! (table-vals
-
-
-
-#_(defn facility-search
-  [request]
-  (app-page-wrapper
-   (html `[:select
-           ~@(map (fn [x] `[:option {:value ~x} ~x]) ; POD doesn't like #(`...
-                  (query-toplevel-chars))
-           ])))
