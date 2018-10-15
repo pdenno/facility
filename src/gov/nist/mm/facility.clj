@@ -12,8 +12,6 @@
             [cheshire.core]
             [clojure.string :as str]
             
-            [edu.ucdenver.ccp.kr.kb :as kb]
-            [edu.ucdenver.ccp.kr.rdf :as rdf]
             [edu.ucdenver.ccp.kr.sparql :as sparql]
             [edu.ucdenver.ccp.kr.jena.kb :as jena]
             
@@ -45,12 +43,14 @@
 
 (def rrr (atom nil))
 
+(def onto-ns (create-ns 'onto))
 
+;;; This should be elsewhere. Probably a separate project shared by facility and ontolatex. 
 ;;; ================= Tawny stuff borrowed from ontolatex ====================
 (def tawny-types [:tawny.owl/class :tawny.owl/individual :tawny.owl/property
                   :tawny.owl/object-property :tawny.owl/data-property])
 
-(def ontologies "A list of the ontologies used in this project"
+(def ontologies "A vector of the ontologies used in this project"
   ["http://modelmeth.nist.gov/ontologies/pizza/pizza.owl"
    "http://www.linkedmodel.org/schema/dtype"
    "http://www.linkedmodel.org/schema/vaem"
@@ -58,21 +58,17 @@
    "http://modelmeth.nist.gov/modeling"
    "http://modelmeth.nist.gov/operations"])
 
+;;; POD Useless? 
+(def manager (owl/owl-ontology-manager))
+
+;;; POD Useless?
+(defn make-ontos
+  []
+  (doall (map #(OWLOntologyID. (owl/iri %)) ontologies)))
+
 ;;; POD I expected this to be http://modelmeth.nist.gov/modeling#clojureCodeNote
 (def ^:const code-iri "Used to identify clojure notes from thing-mapped objects."
   (list :iri "http://modelmeth.nist.gov/modeling#clojureCode"))
-
-(defn read-base-ontos!
-  []
-  (rowl/read :iri "http://www.linkedmodel.org/schema/dtype"
-             :namespace (create-ns 'onto) ; was onto.dtype
-             :location (clojure.java.io/file "resources/dtype.owl"))
-  (rowl/read :iri "http://www.linkedmodel.org/schema/vaem"
-             :namespace (create-ns 'onto) ; was onto.vaem
-             :location (clojure.java.io/file "resources/vaem.owl"))
-  (rowl/read :iri "http://qudt.org/2.0/schema/qudt"
-             :namespace (create-ns 'onto) ; was onto.qudt
-             :location (clojure.java.io/file "resources/SCHEMA_QUDT-v2.0.ttl")))
 
 (defn clear-ontos!
   "Remove all the ontologies"
@@ -82,27 +78,107 @@
    (fn []           
      (doall (map #(owl/remove-ontology-maybe (OWLOntologyID. (owl/iri %))) ontologies)))))
 
-(defn load-kb
-  "Return a KB object with input loaded."
-  [& files]
-  (let [kb (kb/kb :jena-mem)]
-    (dorun (map #(rdf/load-rdf kb (ByteArrayInputStream. (.getBytes (slurp %))) :turtle) files))
-    (rdf/synch-ns-mappings kb)))
-
-(def mfg-kb (load-kb (clojure.java.io/resource "operations.ttl")
-                     (clojure.java.io/resource "toplevel-taxonomies.ttl")))
-
-
-
-(defn load-kb []
+(defn reload-kb []
+  (make-ontos)
   (clear-ontos!)
-  (read-base-ontos!)
-  (rowl/read :iri (str "http://modelmeth.nist.gov/" uri-base)
-             :namespace (create-ns (:onto-namespace @+params+)) 
-             :location (clojure.java.io/file onto-file))
+  ;(doall (map #(ns-unmap onto-ns %) (ns-interns onto-ns)))
+  (rowl/read :iri "http://www.linkedmodel.org/schema/dtype"
+             :namespace onto-ns
+             :location (clojure.java.io/file "resources/dtype.owl"))
+  (rowl/read :iri "http://www.linkedmodel.org/schema/vaem"
+             :namespace onto-ns
+             :location (clojure.java.io/file "resources/vaem.owl"))
+  (rowl/read :iri "http://qudt.org/2.0/schema/qudt"
+             :namespace onto-ns 
+             :location (clojure.java.io/file "resources/SCHEMA_QUDT-v2.0.ttl"))
+  (rowl/read :iri "http://modelmeth.nist.gov/ops"
+             :namespace onto-ns
+             :location (clojure.java.io/file "resources/operations.ttl"))
+  (rowl/read :iri "http://modelmeth.nist.gov/modeling"
+             :namespace onto-ns
+             :location (clojure.java.io/file "resources/modeling.ttl")))
 
+(declare thing-map)
 
+(defn clojure-code
+  "Return any http://modelmeth.nist.gov/modeling#clojureCode annotation"
+  [obj]
+  (some #(when (and (= (:otype %) :annotation)
+                    (= (:type %) code-iri))
+           (:literal %))
+        (-> obj thing-map :notes)))
 
+;;; POD needs to return true if a supertype is ignored. 
+(defn ignore?
+  "Returns true if the tawny thing has a clojure {:priority :ignore}"
+  [obj]
+  (if (some #(= (owl/guess-type (owl/get-current-ontology) obj) %) tawny-types)
+    (when-let [code (clojure-code obj)]
+      (= :ignore (:priority (read-string code))))
+    true))
+
+(defn onto-parent-child-map
+  "Define the parent/child relationship as a map."
+  [root]
+  (let [obj2var-map
+        (let [ks (remove #(ignore? (var-get %))
+                         (vals (ns-interns onto-ns)))
+              vs (map var-get ks)]
+          (clojure.set/map-invert (zipmap ks vs))),
+        m (reduce (fn [index node]
+                    (assoc index (get obj2var-map node)
+                           (map #(get obj2var-map %)
+                                (owl/direct-subclasses node))))
+                  {}
+                  (conj (owl/subclasses root) root))]
+    (as-> m ?map
+      (dissoc ?map nil)
+      (reduce (fn [m k] (update m k #(vec (filter identity %))))
+              ?map
+              (keys ?map)))))
+
+(defn next-paths
+  "Return all paths one-step further than the argument, if any."
+  [path index]
+  (if (empty? path)
+    []
+    (vec (map #(conj path %) (vec (get index (last path)))))))
+
+(defn onto-root-map
+  "Define the ontology root structure as a nested map."
+  [accum paths index]
+  (if (empty? paths)
+    accum
+    (recur
+     (assoc-in accum (first paths) {})
+     (let [nexts (next-paths (first paths) index)]
+       (if (empty? nexts)
+         (vec (next paths))
+         (into nexts (vec (next paths)))))
+     index)))
+
+(defn vectify
+  "Turn a nested map like that from onto-root-map into a nested vector
+   where every var leaf is followed by a vector representing its subclasses 
+   (could be empty)."
+  [nested-map]
+  (clojure.walk/prewalk
+   #(if (var? %)
+      %
+      (vec (interleave (keys %) (vals %))))
+   nested-map))
+
+(defn roots-nested-vector
+  "Return a nested vector of root objects and their subclasses."
+  [& root-concepts]
+  (map (fn [root-sym]
+         (let [pc-map (onto-parent-child-map (var-get (resolve root-sym)))]
+           (-> (onto-root-map {} [[(resolve root-sym)]] pc-map) 
+               vectify )))
+       root-concepts))
+
+(defn tryme []
+  (roots-nested-vector 'onto/OperationsDomainConcept))
 ;;; ================= End  ====================
 
 
@@ -190,7 +266,7 @@
   "Return a URL for an owl:Class."
   `[:a {:href ~(str root "?name=" (url-encode obj))} ~(str (name obj))])
 
-(defn- system-pg
+#_(defn- system-pg
   "Handle page for system tab."
   [request]
   (app-page-wrapper {:tab :system}
@@ -225,7 +301,36 @@
   [name]
   :nyi)
 
-#_(defn thing-map
+(defn simplify-tawny-annotations
+  "Some are (:comment <pairs>). Some are (:annotation code-iri <pairs>)"
+  [tawny-notes]
+  (vec
+   (doall
+    (map #(let [original %]
+            (as-> original ?note
+              (cond (= (first ?note) :comment) (second ?note),
+                    (= (first ?note) :annotation ) (-> ?note rest rest first))
+              (apply hash-map ?note)
+              (assoc ?note :otype (first original))))
+         tawny-notes))))
+
+(defn short-name
+  "Argument is an OWLClassImpl etc."
+  [obj]
+  (->> obj
+       look/named-entity-as-string
+       (re-matches #".*\#(.*)")
+       second))
+
+(defn properties-of
+  "Return a seq of properties that are relevant to the argument tmap."
+  [tmap property-map]
+  (let [sname (:short-name tmap)]
+     (filter (fn [pm] (or (some #(= sname %) (:domains pm))
+                          (some #(= sname %) (:ranges  pm))))
+             (vals property-map))))
+
+(defn thing-map
   "Return a map of information about the class. See also query/into-map-with"
   ([obj] (thing-map obj {})) ; Used by ignore? 
   ([obj property-map]
@@ -233,13 +338,12 @@
      (let [sname (short-name obj)]
        (as-> (apply hash-map (tawny.render/as-form obj :keyword true)) ?map
          (assoc ?map :short-name sname) ; POD (or label)
-         (assoc ?map :var (intern (:onto-namespace @+params+) (symbol sname)))
+         (assoc ?map :var (intern onto-ns (symbol sname)))
          (assoc ?map :notes (simplify-tawny-annotations (:annotation ?map)))
          (assoc ?map :subclass-of (doall (map short-name ; POD there are other ways. See notes 2017-07-22. 
                                               (filter #(instance? OWLClass %)
                                                       (owl/direct-superclasses obj)))))
          (assoc ?map :properties (properties-of ?map property-map)))))))
-
 
 (defn- concept-desc-pg
   "Describe an owl:Class."
