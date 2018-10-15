@@ -1,3 +1,16 @@
+(ns dtype    (:use [tawny.owl]))
+(ns vaem     (:use [tawny.owl]))
+(ns qudt     (:use [tawny.owl]))
+(ns modeling (:use [tawny.owl]))
+
+(ns operations
+  (:use [tawny.owl])
+  (:require [dtype]
+            [vaem]
+            [qudt]
+            [modeling]
+            #_[tawny.reasoner]))
+
 (ns gov.nist.mm.facility
   (:require [immutant.web             :as web]
             [immutant.web.async       :as async]
@@ -15,7 +28,7 @@
             [edu.ucdenver.ccp.kr.sparql :as sparql]
             [edu.ucdenver.ccp.kr.jena.kb :as jena]
             
-            [tawny.owl :as owl]
+            [tawny.owl :as tawny.owl]
             [tawny.query :as query]
             [tawny.render]
             [tawny.read :as rowl]
@@ -41,63 +54,74 @@
            java.io.ByteArrayInputStream)
   (:gen-class))
 
-(def rrr (atom nil))
+(def rrr "temporary, for debugging" (atom nil))
 
-(def onto-ns (create-ns 'onto))
+
+(def ontos "A vector of the ontologies descriptionsused in this project"
+  {:dtype {:ns (find-ns 'dtype)
+           :iri "http://www.linkedmodel.org/schema/dtype"
+           :file "dtype.owl"}
+   :vaem  {:ns (find-ns 'vaem)
+           :iri "http://www.linkedmodel.org/schema/vaem"
+           :file "vaem.owl"}
+;   :qudt  {:ns (find-ns 'qudt)
+;           :iri "http://qudt.org/2.0/schema/qudt"
+;           :file "qudt.ttl"}
+   :modeling {:ns (find-ns 'modeling)
+              :iri "http://modelmeth.nist.gov/modeling"
+              :file "modeling.ttl"}
+   :operations {:ns (find-ns 'operations)
+                :iri "http://modelmeth.nist.gov/operations"
+                :file "operations.ttl"}})
 
 ;;; This should be elsewhere. Probably a separate project shared by facility and ontolatex. 
 ;;; ================= Tawny stuff borrowed from ontolatex ====================
+
+;;; Concepts:
+;;; - Ontologies are associated with namespaces. See ref @tawny.owl/ontology-for-namespace.
+;;; - You need to be in the namespace to do the operations. (tawny.owl/get-current-ontology)
+
 (def tawny-types [:tawny.owl/class :tawny.owl/individual :tawny.owl/property
                   :tawny.owl/object-property :tawny.owl/data-property])
 
-(def ontologies "A vector of the ontologies used in this project"
-  ["http://modelmeth.nist.gov/ontologies/pizza/pizza.owl"
-   "http://www.linkedmodel.org/schema/dtype"
-   "http://www.linkedmodel.org/schema/vaem"
-   "http://qudt.org/2.0/schema/qudt"
-   "http://modelmeth.nist.gov/modeling"
-   "http://modelmeth.nist.gov/operations"])
 
 ;;; POD Useless? 
-(def manager (owl/owl-ontology-manager))
+(def manager (tawny.owl/owl-ontology-manager))
 
-;;; POD Useless?
-(defn make-ontos
-  []
-  (doall (map #(OWLOntologyID. (owl/iri %)) ontologies)))
+(def project-ontos
+  (map #(OWLOntologyID. (tawny.owl/iri %)) ontologies))
 
 ;;; POD I expected this to be http://modelmeth.nist.gov/modeling#clojureCodeNote
 (def ^:const code-iri "Used to identify clojure notes from thing-mapped objects."
   (list :iri "http://modelmeth.nist.gov/modeling#clojureCode"))
+                   
+(defn load-onto
+  "Load an ontology. The argument is a keyword from the ontos map."
+  [onto]
+  (binding [*ns* (-> ontos onto :ns)]
+    (tawny.owl/remove-ontology-maybe
+     (OWLOntologyID. (IRI/create (-> ontos onto :iri))))
+    (dosync
+     (alter tawny.owl/ontology-for-namespace
+            #(assoc %
+                    (-> ontos onto :ns)
+                    (.loadOntologyFromOntologyDocument
+                     (tawny.owl/owl-ontology-manager)
+                     (IRI/create (clojure.java.io/resource (-> ontos onto :file)))))))))
 
-(defn clear-ontos!
-  "Remove all the ontologies"
+(defn load-ontos
+  "Load all the project ontologies."
   []
-  (repeatedly
-   5
-   (fn []           
-     (doall (map #(owl/remove-ontology-maybe (OWLOntologyID. (owl/iri %))) ontologies)))))
-
-(defn reload-kb []
-  (make-ontos)
-  (clear-ontos!)
-  ;(doall (map #(ns-unmap onto-ns %) (ns-interns onto-ns)))
-  (rowl/read :iri "http://www.linkedmodel.org/schema/dtype"
-             :namespace onto-ns
-             :location (clojure.java.io/file "resources/dtype.owl"))
-  (rowl/read :iri "http://www.linkedmodel.org/schema/vaem"
-             :namespace onto-ns
-             :location (clojure.java.io/file "resources/vaem.owl"))
-  (rowl/read :iri "http://qudt.org/2.0/schema/qudt"
-             :namespace onto-ns 
-             :location (clojure.java.io/file "resources/SCHEMA_QUDT-v2.0.ttl"))
-  (rowl/read :iri "http://modelmeth.nist.gov/ops"
-             :namespace onto-ns
-             :location (clojure.java.io/file "resources/operations.ttl"))
-  (rowl/read :iri "http://modelmeth.nist.gov/modeling"
-             :namespace onto-ns
-             :location (clojure.java.io/file "resources/modeling.ttl")))
-
+  (map load-onto (keys ontos))
+  #_(binding [*ns* (-> ontos :operations :ns)] 
+    (tawny.owl/owl-import (-> ontos :modeling :ns)))) ; <================= WRONG!
+    
+(defn onto-ref
+  "Safely dereference a symbol to a ontology entry."
+  [sym]
+  (when-let [var (resolve sym)]
+    (var-get var)))
+  
 (declare thing-map)
 
 (defn clojure-code
@@ -112,7 +136,7 @@
 (defn ignore?
   "Returns true if the tawny thing has a clojure {:priority :ignore}"
   [obj]
-  (if (some #(= (owl/guess-type (owl/get-current-ontology) obj) %) tawny-types)
+  (if (some #(= (tawny.owl/guess-type (tawny.owl/get-current-ontology) obj) %) tawny-types)
     (when-let [code (clojure-code obj)]
       (= :ignore (:priority (read-string code))))
     true))
@@ -128,9 +152,9 @@
         m (reduce (fn [index node]
                     (assoc index (get obj2var-map node)
                            (map #(get obj2var-map %)
-                                (owl/direct-subclasses node))))
+                                (tawny.owl/direct-subclasses node))))
                   {}
-                  (conj (owl/subclasses root) root))]
+                  (conj (tawny.owl/subclasses root) root))]
     (as-> m ?map
       (dissoc ?map nil)
       (reduce (fn [m k] (update m k #(vec (filter identity %))))
@@ -178,7 +202,8 @@
        root-concepts))
 
 (defn tryme []
-  (roots-nested-vector 'onto/OperationsDomainConcept))
+  (roots-nested-vector 'onto/OperationsDomainConcept)
+  (tawny.owl/subclasses (var-get (resolve 'onto/OperationsDomainConcept))))
 ;;; ================= End  ====================
 
 
@@ -266,10 +291,10 @@
   "Return a URL for an owl:Class."
   `[:a {:href ~(str root "?name=" (url-encode obj))} ~(str (name obj))])
 
-#_(defn- system-pg
+(defn- system-pg
   "Handle page for system tab."
   [request]
-  (app-page-wrapper {:tab :system}
+  #_(app-page-wrapper {:tab :system}
     (let [params (sparql/query mfg-kb '((?/x rdfs/subClassOf Physical)))
           params-url (map owl-class-url (map '?/x params))]
       (html
@@ -342,7 +367,7 @@
          (assoc ?map :notes (simplify-tawny-annotations (:annotation ?map)))
          (assoc ?map :subclass-of (doall (map short-name ; POD there are other ways. See notes 2017-07-22. 
                                               (filter #(instance? OWLClass %)
-                                                      (owl/direct-superclasses obj)))))
+                                                      (tawny.owl/direct-superclasses obj)))))
          (assoc ?map :properties (properties-of ?map property-map)))))))
 
 (defn- concept-desc-pg
