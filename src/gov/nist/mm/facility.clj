@@ -58,21 +58,21 @@
 
 
 (def ontos "A vector of the ontologies descriptionsused in this project"
-  {:dtype {:ns (find-ns 'dtype)
-           :iri "http://www.linkedmodel.org/schema/dtype"
-           :file "dtype.owl"}
-   :vaem  {:ns (find-ns 'vaem)
-           :iri "http://www.linkedmodel.org/schema/vaem"
-           :file "vaem.owl"}
-;   :qudt  {:ns (find-ns 'qudt)
-;           :iri "http://qudt.org/2.0/schema/qudt"
-;           :file "qudt.ttl"}
-   :modeling {:ns (find-ns 'modeling)
-              :iri "http://modelmeth.nist.gov/modeling"
-              :file "modeling.ttl"}
-   :operations {:ns (find-ns 'operations)
-                :iri "http://modelmeth.nist.gov/operations"
-                :file "operations.ttl"}})
+;;;  {:dtype {:ns (find-ns 'dtype)
+;;;           :iri "http://www.linkedmodel.org/schema/dtype"
+;;;           :file "dtype.owl"}
+;;;   :vaem  {:ns (find-ns 'vaem)
+;;;           :iri "http://www.linkedmodel.org/schema/vaem"
+;;;           :file "vaem.owl"}
+;;;   :qudt  {:ns (find-ns 'qudt)
+;;;           :iri "http://qudt.org/2.0/schema/qudt"
+;;;           :file "qudt.ttl"}
+   {:modeling {:ns (find-ns 'modeling)
+               :iri "http://modelmeth.nist.gov/modeling"
+               :file "modeling-local.ttl"}
+    :operations {:ns (find-ns 'operations)
+                 :iri "http://modelmeth.nist.gov/operations"
+                 :file "operations.ttl"}})
 
 ;;; This should be elsewhere. Probably a separate project shared by facility and ontolatex. 
 ;;; ================= Tawny stuff borrowed from ontolatex ====================
@@ -84,16 +84,36 @@
 (def tawny-types [:tawny.owl/class :tawny.owl/individual :tawny.owl/property
                   :tawny.owl/object-property :tawny.owl/data-property])
 
-
 ;;; POD Useless? 
 (def manager (tawny.owl/owl-ontology-manager))
-
-(def project-ontos
-  (map #(OWLOntologyID. (tawny.owl/iri %)) ontologies))
 
 ;;; POD I expected this to be http://modelmeth.nist.gov/modeling#clojureCodeNote
 (def ^:const code-iri "Used to identify clojure notes from thing-mapped objects."
   (list :iri "http://modelmeth.nist.gov/modeling#clojureCode"))
+
+(defn iri-frag
+  [iri-str]
+  (second (re-matches #"<.*\#(.+)>" iri-str)))
+
+(defn my-intern-owl
+  "Like tawny.owl/intern-owl, but interns in the current package, no hooks though.
+   sym is a symbol."
+  [sym entity]
+  (let [var (intern *ns* sym entity)]
+    (alter-meta! var #(merge % {:owl true}))
+    var))
+
+(defn intern-subclasses
+  "Intern all the sublasses of the argument Entity, whereever they are."
+  [ent]
+  (loop [onames (map key ontos)]
+    (let [oname (first onames)]
+      (binding [*ns* (-> ontos oname :ns)]
+        (let [o (tawny.owl/get-current-ontology)]
+          (doall (map #(my-intern-owl (-> % .toString iri-frag symbol) %)
+                      (tawny.owl/subclasses o ent)))))
+      (when-not (empty? onames)
+        (recur (rest onames))))))
                    
 (defn load-onto
   "Load an ontology. The argument is a keyword from the ontos map."
@@ -101,7 +121,7 @@
   (binding [*ns* (-> ontos onto :ns)]
     (tawny.owl/remove-ontology-maybe
      (OWLOntologyID. (IRI/create (-> ontos onto :iri))))
-    (dosync
+    (dosync ; see also tawny.owl/ontology-to-namespace. 
      (alter tawny.owl/ontology-for-namespace
             #(assoc %
                     (-> ontos onto :ns)
@@ -109,15 +129,26 @@
                      (tawny.owl/owl-ontology-manager)
                      (IRI/create (clojure.java.io/resource (-> ontos onto :file)))))))))
 
+(def physical (atom nil))
+(def abstract (atom nil))
+
 (defn load-ontos
   "Load all the project ontologies."
   []
-  (map load-onto (keys ontos))
+  (doall (map load-onto (keys ontos)))
+  (binding [*ns* (find-ns 'operations)] 
+    (reset! physical
+            (tawny.owl/entity-for-iri (IRI/create "http://modelmeth.nist.gov/modeling#Physical")))
+    (reset! abstract
+            (tawny.owl/entity-for-iri (IRI/create "http://modelmeth.nist.gov/modeling#Abstract"))))
+  (intern-subclasses @physical)
+  (intern-subclasses @abstract)
+  true)
   #_(binding [*ns* (-> ontos :operations :ns)] 
-    (tawny.owl/owl-import (-> ontos :modeling :ns)))) ; <================= WRONG!
+    (tawny.owl/owl-import (-> ontos :modeling :ns))) ; <================= WRONG!
     
 (defn onto-ref
-  "Safely dereference a symbol to a ontology entry."
+  "Safely dereference a symbol to an ontology entry. Works after things are interned!"
   [sym]
   (when-let [var (resolve sym)]
     (var-get var)))
@@ -140,6 +171,8 @@
     (when-let [code (clojure-code obj)]
       (= :ignore (:priority (read-string code))))
     true))
+
+(def onto-ns (find-ns 'operations)) ; POD TEMPORARY <==================================
 
 (defn onto-parent-child-map
   "Define the parent/child relationship as a map."
