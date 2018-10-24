@@ -5,11 +5,11 @@
 
 (ns operations
   (:use [tawny.owl])
-  (:require [dtype]
-            [vaem]
-            [qudt]
+  (:require ;[dtype]
+            ;[vaem]
+            ;[qudt]
             [modeling]
-            #_[tawny.reasoner]))
+            [tawny.reasoner]))
 
 (ns gov.nist.mm.facility
   (:require [immutant.web             :as web]
@@ -49,15 +49,17 @@
     OWLIndividual OWLDatatype
     OWLObjectPropertyExpression
     OWLNamedObject OWLOntologyID)
+   org.semanticweb.owlapi.util.AutoIRIMapper
    [org.semanticweb.owlapi.search EntitySearcher])
   (:import java.net.URI
            java.io.ByteArrayInputStream)
   (:gen-class))
 
 (def rrr "temporary, for debugging" (atom nil))
+(def diag "temporary, for debugging" (atom nil))
+(def onto-base "http://modelmeth.nist.gov/")
 
-
-(def ontos "A vector of the ontologies descriptionsused in this project"
+(def ontos "A map describing the ontologies used in this project"
 ;;;  {:dtype {:ns (find-ns 'dtype)
 ;;;           :iri "http://www.linkedmodel.org/schema/dtype"
 ;;;           :file "dtype.owl"}
@@ -67,12 +69,12 @@
 ;;;   :qudt  {:ns (find-ns 'qudt)
 ;;;           :iri "http://qudt.org/2.0/schema/qudt"
 ;;;           :file "qudt.ttl"}
-   {:modeling {:ns (find-ns 'modeling)
-               :iri "http://modelmeth.nist.gov/modeling"
-               :file "modeling-local.ttl"}
+   {:modeling   {:ns (find-ns 'modeling)
+                 :iri (str onto-base "modeling")
+                 :file "modeling.owl"}
     :operations {:ns (find-ns 'operations)
-                 :iri "http://modelmeth.nist.gov/operations"
-                 :file "operations.ttl"}})
+                 :iri (str onto-base "operations")
+                 :file "operations.owl"}})
 
 ;;; This should be elsewhere. Probably a separate project shared by facility and ontolatex. 
 ;;; ================= Tawny stuff borrowed from ontolatex ====================
@@ -89,11 +91,33 @@
 
 ;;; POD I expected this to be http://modelmeth.nist.gov/modeling#clojureCodeNote
 (def ^:const code-iri "Used to identify clojure notes from thing-mapped objects."
-  (list :iri "http://modelmeth.nist.gov/modeling#clojureCode"))
+  (list :iri (str onto-base "modeling#clojureCode")))
 
 (defn iri-frag
   [iri-str]
   (second (re-matches #"<.*\#(.+)>" iri-str)))
+
+(defmacro with-onto [name & body]
+  `(binding [*ns* (-> ontos ~name :ns)]
+     ~@body))
+
+(defn onto-get
+  [st]
+  (with-onto :operations
+    (tawny.owl/entity-for-iri (IRI/create (str onto-base st)))))
+
+;;; https://stackoverflow.com/questions/47394033/does-autoirimapper-cannot-read-ontologies-from-ttl-files
+;;; "At present AutoIRIMapper only supports functional syntax, manchester syntax and RDF/XML."
+;;; My experience is that they have to be RDF/XML and they have to be named .owl !!!
+(defn add-mapper
+  "Find onto file locally in resources directory."
+  []
+  (let [folder (clojure.java.io/file "resources")
+        mapper (AutoIRIMapper. folder true)]
+    (with-onto :modeling
+      (-> (tawny.owl/owl-ontology-manager)
+          .getIRIMappers
+          (.add (vector mapper))))))
 
 (defn my-intern-owl
   "Like tawny.owl/intern-owl, but interns in the current package, no hooks though.
@@ -107,45 +131,36 @@
   "Intern all the sublasses of the argument Entity, whereever they are."
   [ent]
   (loop [onames (map key ontos)]
-    (let [oname (first onames)]
-      (binding [*ns* (-> ontos oname :ns)]
+    (when-let [oname (first onames)]
+      (with-onto oname
         (let [o (tawny.owl/get-current-ontology)]
           (doall (map #(my-intern-owl (-> % .toString iri-frag symbol) %)
                       (tawny.owl/subclasses o ent)))))
       (when-not (empty? onames)
         (recur (rest onames))))))
-                   
+
 (defn load-onto
   "Load an ontology. The argument is a keyword from the ontos map."
-  [onto]
-  (binding [*ns* (-> ontos onto :ns)]
+  [oname]
+  (with-onto oname
+    (add-mapper)
     (tawny.owl/remove-ontology-maybe
-     (OWLOntologyID. (IRI/create (-> ontos onto :iri))))
-    (dosync ; see also tawny.owl/ontology-to-namespace. 
-     (alter tawny.owl/ontology-for-namespace
-            #(assoc %
-                    (-> ontos onto :ns)
-                    (.loadOntologyFromOntologyDocument
-                     (tawny.owl/owl-ontology-manager)
-                     (IRI/create (clojure.java.io/resource (-> ontos onto :file)))))))))
-
-(def physical (atom nil))
-(def abstract (atom nil))
+     (OWLOntologyID. (IRI/create (-> ontos oname :iri))))
+    (tawny.owl/ontology-to-namespace
+     (-> ontos oname :ns)
+     (.loadOntologyFromOntologyDocument
+      (tawny.owl/owl-ontology-manager)
+      (IRI/create (clojure.java.io/resource (-> ontos oname :file)))))))
 
 (defn load-ontos
   "Load all the project ontologies."
   []
   (doall (map load-onto (keys ontos)))
-  (binding [*ns* (find-ns 'operations)] 
-    (reset! physical
-            (tawny.owl/entity-for-iri (IRI/create "http://modelmeth.nist.gov/modeling#Physical")))
-    (reset! abstract
-            (tawny.owl/entity-for-iri (IRI/create "http://modelmeth.nist.gov/modeling#Abstract"))))
-  (intern-subclasses @physical)
-  (intern-subclasses @abstract)
-  true)
-  #_(binding [*ns* (-> ontos :operations :ns)] 
-    (tawny.owl/owl-import (-> ontos :modeling :ns))) ; <================= WRONG!
+  (with-onto :operations
+    ;(intern-subclasses (onto-get "modeling#Physical")) ; POD now that things are working...
+    ;(intern-subclasses (onto-get "modeling#Abstract")) ; ...do I care to intern?
+    (tawny.owl/owl-import 
+     (tawny.owl/ontology-for-namespace (-> ontos :modeling :ns)))))
     
 (defn onto-ref
   "Safely dereference a symbol to an ontology entry. Works after things are interned!"
@@ -172,73 +187,21 @@
       (= :ignore (:priority (read-string code))))
     true))
 
-(def onto-ns (find-ns 'operations)) ; POD TEMPORARY <==================================
+(defn more-specific?
+  "Compare owl classes"
+  [x y]
+  (cond ((tawny.owl/subclasses y) x) -1 
+        (= x y) 0
+        :else 1))
 
-(defn onto-parent-child-map
-  "Define the parent/child relationship as a map."
-  [root]
-  (let [obj2var-map
-        (let [ks (remove #(ignore? (var-get %))
-                         (vals (ns-interns onto-ns)))
-              vs (map var-get ks)]
-          (clojure.set/map-invert (zipmap ks vs))),
-        m (reduce (fn [index node]
-                    (assoc index (get obj2var-map node)
-                           (map #(get obj2var-map %)
-                                (tawny.owl/direct-subclasses node))))
-                  {}
-                  (conj (tawny.owl/subclasses root) root))]
-    (as-> m ?map
-      (dissoc ?map nil)
-      (reduce (fn [m k] (update m k #(vec (filter identity %))))
-              ?map
-              (keys ?map)))))
+(defn more-general?
+  "Compare owl classes"
+  [x y]
+  (cond ((tawny.owl/superclasses y) x) -1 
+        (= x y) 0
+        :else 1))
 
-(defn next-paths
-  "Return all paths one-step further than the argument, if any."
-  [path index]
-  (if (empty? path)
-    []
-    (vec (map #(conj path %) (vec (get index (last path)))))))
-
-(defn onto-root-map
-  "Define the ontology root structure as a nested map."
-  [accum paths index]
-  (if (empty? paths)
-    accum
-    (recur
-     (assoc-in accum (first paths) {})
-     (let [nexts (next-paths (first paths) index)]
-       (if (empty? nexts)
-         (vec (next paths))
-         (into nexts (vec (next paths)))))
-     index)))
-
-(defn vectify
-  "Turn a nested map like that from onto-root-map into a nested vector
-   where every var leaf is followed by a vector representing its subclasses 
-   (could be empty)."
-  [nested-map]
-  (clojure.walk/prewalk
-   #(if (var? %)
-      %
-      (vec (interleave (keys %) (vals %))))
-   nested-map))
-
-(defn roots-nested-vector
-  "Return a nested vector of root objects and their subclasses."
-  [& root-concepts]
-  (map (fn [root-sym]
-         (let [pc-map (onto-parent-child-map (var-get (resolve root-sym)))]
-           (-> (onto-root-map {} [[(resolve root-sym)]] pc-map) 
-               vectify )))
-       root-concepts))
-
-(defn tryme []
-  (roots-nested-vector 'onto/OperationsDomainConcept)
-  (tawny.owl/subclasses (var-get (resolve 'onto/OperationsDomainConcept))))
 ;;; ================= End  ====================
-
 
 ;;; TODO:
 ;;;   DONE - Try to remove package specification for hiccup.
@@ -324,11 +287,12 @@
   "Return a URL for an owl:Class."
   `[:a {:href ~(str root "?name=" (url-encode obj))} ~(str (name obj))])
 
+;;; POD Make this a table with "Production System Terms" and "Modeling Terms"
 (defn- system-pg
   "Handle page for system tab."
   [request]
-  #_(app-page-wrapper {:tab :system}
-    (let [params (sparql/query mfg-kb '((?/x rdfs/subClassOf Physical)))
+  (app-page-wrapper {:tab :system}
+    (let [params (sparql/query mfg-kb '((?/x rdfs/subClassOf (onto-get "modeling#Physical"))))
           params-url (map owl-class-url (map '?/x params))]
       (html
         [:h1 "Production System Concepts"]
@@ -395,13 +359,17 @@
    (when (instance? OWLClass obj)
      (let [sname (short-name obj)]
        (as-> (apply hash-map (tawny.render/as-form obj :keyword true)) ?map
-         (assoc ?map :short-name sname) ; POD (or label)
-         (assoc ?map :var (intern onto-ns (symbol sname)))
+         (assoc ?map :label sname) ; POD (or label)
          (assoc ?map :notes (simplify-tawny-annotations (:annotation ?map)))
-         (assoc ?map :subclass-of (doall (map short-name ; POD there are other ways. See notes 2017-07-22. 
-                                              (filter #(instance? OWLClass %)
-                                                      (tawny.owl/direct-superclasses obj)))))
+         (assoc ?map :direct-subclasses (tawny.owl/direct-subclasses obj))
+         (assoc ?map :superclasses (vec (sort more-specific? (tawny.owl/superclasses obj))))
          (assoc ?map :properties (properties-of ?map property-map)))))))
+
+
+
+
+
+        
 
 (defn- concept-desc-pg
   "Describe an owl:Class."
