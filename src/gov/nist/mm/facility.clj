@@ -12,7 +12,8 @@
             [tawny.reasoner]))
 
 (ns gov.nist.mm.facility
-  (:require [immutant.web             :as web]
+  (:require [clojure.pprint :refer (cl-format pprint)]
+            [immutant.web             :as web]
             [immutant.web.async       :as async]
             [immutant.web.sse         :as sse]
             [immutant.web.middleware  :as immutant]
@@ -224,8 +225,11 @@
 (defn echo
   "Echos the request back as a string."
   [request]
-  (-> (response (with-out-str (pprint request)))
-    (content-type "text/plain")))
+  (reset! rrr {:the-request request})
+  (-> (response (with-out-str
+                  (cl-format *out* "~%Call to echo returns:~%")
+                  (pprint request)))
+      (content-type "text/plain")))
 
 (defn wrap-content-type 
   "Add to headers on response. (See ring-clojure/ring 'Concepts' page on GitHub.)"
@@ -240,8 +244,8 @@
   `[:ul
     ~@(map (fn [[k v]]
              (if (= k tab)
-               `[:li {:class "active"} [:a {:href ~(str "/FacilitySearch/" (name k))} ~v]]
-               `[:li                   [:a {:href ~(str "/FacilitySearch/" (name k))} ~v]]))
+               `[:li {:class "active"} [:a {:href ~(str "/Facility/" (name k))} ~v]]
+               `[:li                   [:a {:href ~(str "/Facility/" (name k))} ~v]]))
            {:system "Production System",
             :modeling "Modeling"
             :concepts "Concepts"
@@ -285,25 +289,29 @@
 (defn owl-class-url
   [obj & {:keys [root] :or {root "concepts"}}]
   "Return a URL for an owl:Class."
-  `[:a {:href ~(str root "?name=" (url-encode obj))} ~(str (name obj))])
+  (let [iri (.getIRI obj)
+        name (->  iri .toString (subs 7) url-encode)
+        sname (.getShortForm iri)]
+    [:a {:href (str root "?name=" name)} sname]))
 
 ;;; POD Make this a table with "Production System Terms" and "Modeling Terms"
-(defn- system-pg
-  "Handle page for system tab."
+(defn- list-pg
+  "Respond with a table containing system and modeling concepts each in a column."
   [request]
   (app-page-wrapper {:tab :system}
-    (let [params (sparql/query mfg-kb '((?/x rdfs/subClassOf (onto-get "modeling#Physical"))))
-          params-url (map owl-class-url (map '?/x params))]
+    (let [ops (with-onto :operations
+                (->> "operations#OperationsDomainConcept"
+                     onto-get
+                     tawny.owl/subclasses
+                     (sort #(let [name1 (-> %1 .getIRI .getShortForm)
+                                  name2 (-> %2 .getIRI .getShortForm)]
+                              (compare name1 name2)))))]
       (html
-        [:h1 "Production System Concepts"]
-        `[:ul
-          ~@(map (fn [d1] [:li d1]) params-url)]))))
-
-(defn- modeling-pg
-  "Handle page for facility modeling tab."
-  [request]
-  (app-page-wrapper {:tab :modeling}
-   "Modeling: Nothing here yet."))
+       [:h1 "Production System and Modeling Concepts"]
+       `[:table {:width "60%"}
+         [:tr [:th "System Concepts"] [:th "Modeling Concepts"]]
+         ~@(map (fn [[sc mc]] [:tr [:td (owl-class-url sc)] [:td (owl-class-url mc)]])
+                (map (fn [x] [x x]) ops))]))))
 
 (defn- search-pg
   "Handle page for search tab."
@@ -365,12 +373,6 @@
          (assoc ?map :superclasses (vec (sort more-specific? (tawny.owl/superclasses obj))))
          (assoc ?map :properties (properties-of ?map property-map)))))))
 
-
-
-
-
-        
-
 (defn- concept-desc-pg
   "Describe an owl:Class."
   [request]
@@ -383,9 +385,8 @@
 
 (defroutes routes
   (GET "/" [] system-pg)
-  (GET "/FacilitySearch/:tab" [tab] 
-       (cond (= tab "system") system-pg
-             (= tab "modeling"  ) modeling-pg
+  (GET "/Facility/:tab" [tab] 
+       (cond (= tab "list"  ) list-pg
              (= tab "concepts") concept-desc-pg
              (= tab "search" ) search-pg))
   (GET "/concepts*" [tab] concept-desc-pg) ; POD Hmmm...
@@ -406,7 +407,7 @@
  (web/stop (-main :port 3034))
   (-main :port 3034))
 
-;;;================== /FacilitySearch/concepts?name=foo =====================================
+;;;================== /Facility/concepts?name=foo =====================================
 ;;; POD rewrite with reduce
 (defn- table-vals
   [text]
