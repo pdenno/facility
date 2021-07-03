@@ -1,1 +1,17 @@
-../../ModelingOntology/catalog-v001.xml
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<catalog prefer="public" xmlns="urn:oasis:names:tc:entity:xmlns:xml:catalog">
+    <uri id="Imports Wizard Entry" name="http://modelmeth.nist.gov/operations" uri="operations-from-turtle.owl"/>
+    <uri id="Imports Wizard Entry" name="http://modelmeth.nist.gov/operations" uri="operations.owl"/>
+    <uri id="User Entered Import Resolution" name="http://modelmeth.nist.gov/modeling" uri="modeling.ttl"/>
+    <uri id="User Entered Import Resolution" name="http://www.linkedmodel.org/1.1/schema/dtype" uri="dtype.owl"/>
+    <uri id="User Entered Import Resolution" name="http://www.linkedmodel.org/2.0/schema/vaem" uri="vaem.owl"/>
+    <uri id="User Entered Import Resolution" name="http://qudt.org/2.0/schema/qudt" uri="SCHEMA_QUDT-v2.0.ttl"/>
+    <uri id="User Entered Import Resolution" name="http://model-meth.nist.gov/1.0/schema/dtype" uri="NIST-model-meth-linked-model-dtype.ttl"/>
+    <uri id="User Entered Import Resolution" name="http://model-meth.nist.gov/1.2/schema/vaem" uri="NIST-model-meth-OSG_vaem-(v1.2).ttl"/>
+    <uri id="User Entered Import Resolution" name="http://model-meth.nist.gov/1.1/schema/qudt" uri="OVG_dimensions-qudt-(v1.1).ttl"/>
+    <group id="Folder Repository, directory=, recursive=true, Auto-Update=true, version=2" prefer="public" xml:base="">
+        <uri id="Automatically generated entry, Timestamp=1625170972338" name="http://modelmeth.nist.gov/modeling" uri="modeling.owl"/>
+        <uri id="Automatically generated entry, Timestamp=1625170972338" name="http://www.linkedmodel.org/schema/dtype" uri="dtype.owl"/>
+        <uri id="Automatically generated entry, Timestamp=1625170972338" name="http://www.linkedmodel.org/schema/vaem" uri="vaem.owl"/>
+    </group>
+</catalog>

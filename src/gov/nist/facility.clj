@@ -1,127 +1,93 @@
-(ns dtype    (:use [tawny.owl]))
-(ns vaem     (:use [tawny.owl]))
-(ns qudt     (:use [tawny.owl]))
-(ns modeling (:use [tawny.owl]))
-
-(ns operations
-  (:use [tawny.owl])
-  (:require ;[dtype]
-            ;[vaem]
-            ;[qudt]
-            [modeling]
-            [tawny.reasoner]))
-
-(ns gov.nist.mm.facility
-  (:require [clojure.pprint :refer (cl-format pprint)]
-            [immutant.web             :as web]
-            [immutant.web.async       :as async]
-            [immutant.web.sse         :as sse]
-            [immutant.web.middleware  :as immutant]
+(ns gov.nist.facility
+  (:require [cheshire.core]
+            [clojure.java.io :as io]
+            [clojure.pprint :refer (cl-format pprint)]
+            [clojure.string :as str]
             [compojure.route          :as route]
             [compojure.core     :refer (ANY GET defroutes)]
-            [ring.util.response :refer (response redirect content-type)]
-            [ring.util.codec    :refer (url-encode url-decode)]
             [environ.core       :refer (env)]
             [hiccup.core :refer (html)]
-            [cheshire.core]
-            [clojure.string :as str]
-            
-            [edu.ucdenver.ccp.kr.sparql :as sparql]
-            [edu.ucdenver.ccp.kr.jena.kb :as jena]
-            
-            [tawny.owl :as tawny.owl]
-            [tawny.query :as query]
+            [mount.core         :refer [defstate]]
+            [immutant.web             :as web]
+            [immutant.web.middleware  :as immutant]
+            [ring.util.response :refer (response #_redirect content-type)]
+            [ring.util.codec    :refer (url-encode url-decode)]
+;;;         [edu.ucdenver.ccp.kr.sparql :as sparql]
+;;;         [edu.ucdenver.ccp.kr.jena.kb :as jena]
+            [taoensso.timbre              :as log]
+            [tawny.owl :as towl]
+;;;         [tawny.query :as query]
             [tawny.render]
-            [tawny.read :as rowl]
-            [tawny.lookup :as look]
-
-            [gov.nist.mm.util :refer :all])
-  (:use clojure.java.io)
-  (:import
+            [tawny.read :as rtowl]
+            [tawny.lookup :as look])
+  (:import ; I'll keep these here since if this grows, I might use a few. 
    (org.semanticweb.owlapi.model
-    HasIRI
-    OWLAxiom
-    OWLEntity
-    OWLObject
-    OWLOntologyManager OWLOntology IRI
-    OWLClassExpression OWLClass OWLAnnotation
-    OWLDataProperty OWLObjectProperty
-    OWLDataPropertyExpression ; not useful?
-    OWLIndividual OWLDatatype
-    OWLObjectPropertyExpression
-    OWLNamedObject OWLOntologyID)
-   org.semanticweb.owlapi.util.AutoIRIMapper
-   [org.semanticweb.owlapi.search EntitySearcher])
-  (:import java.net.URI
-           java.io.ByteArrayInputStream)
+    #_HasIRI
+    #_OWLAxiom
+    #_OWLEntity
+    #_OWLObject
+    #_#_OWLOntologyManager OWLOntology 
+    #_OWLClassExpression OWLClass #_OWLAnnotation
+    #_#_OWLDataProperty OWLObjectProperty
+    #_OWLDataPropertyExpression
+    #_#_OWLIndividual OWLDatatype
+    #_OWLObjectPropertyExpression
+    #_OWLNamedObject OWLOntologyID)
+    org.semanticweb.owlapi.util.AutoIRIMapper
+    #_[org.semanticweb.owlapi.search EntitySearcher])
   (:gen-class))
 
 (def rrr "temporary, for debugging" (atom nil))
 (def diag "temporary, for debugging" (atom nil))
-(def onto-base "http://modelmeth.nist.gov/")
-
-(def ontos "A map describing the ontologies used in this project"
-;;;  {:dtype {:ns (find-ns 'dtype)
-;;;           :iri "http://www.linkedmodel.org/schema/dtype"
-;;;           :file "dtype.owl"}
-;;;   :vaem  {:ns (find-ns 'vaem)
-;;;           :iri "http://www.linkedmodel.org/schema/vaem"
-;;;           :file "vaem.owl"}
-;;;   :qudt  {:ns (find-ns 'qudt)
-;;;           :iri "http://qudt.org/2.0/schema/qudt"
-;;;           :file "qudt.ttl"}
-   {:modeling   {:ns (find-ns 'modeling)
-                 :iri (str onto-base "modeling")
-                 :file "modeling.owl"}
-    :operations {:ns (find-ns 'operations)
-                 :iri (str onto-base "operations")
-                 :file "operations.owl"}})
-
+(def onto-ns (create-ns 'onto))
+  
 ;;; This should be elsewhere. Probably a separate project shared by facility and ontolatex. 
 ;;; ================= Tawny stuff borrowed from ontolatex ====================
 
 ;;; Concepts:
-;;; - Ontologies are associated with namespaces. See ref @tawny.owl/ontology-for-namespace.
-;;; - You need to be in the namespace to do the operations. (tawny.owl/get-current-ontology)
+;;; - Ontologies are associated with namespaces. See ref @towl/ontology-for-namespace.
+;;; - You need to be in the namespace to do the operations. (towl/get-current-ontology)
 
-(def tawny-types [:tawny.owl/class :tawny.owl/individual :tawny.owl/property
-                  :tawny.owl/object-property :tawny.owl/data-property])
+(def tawny-types [:towl/class :towl/individual :towl/property
+                  :towl/object-property :towl/data-property])
 
-;;; POD Useless? 
-(def manager (tawny.owl/owl-ontology-manager))
+;;; Useless? I get a problem with printing. So instead I use the ontos atom. 
+(def manager (towl/owl-ontology-manager))
+
+(def ontos "Map of all the ontologies read" (atom nil))
 
 ;;; POD I expected this to be http://modelmeth.nist.gov/modeling#clojureCodeNote
 (def ^:const code-iri "Used to identify clojure notes from thing-mapped objects."
-  (list :iri (str onto-base "modeling#clojureCode")))
+  (list :iri "http://modelmeth.nist.gov/modeling#clojureCode"))
 
 (defn iri-frag
   [iri-str]
   (second (re-matches #"<.*\#(.+)>" iri-str)))
 
-(defmacro with-onto [name & body]
-  `(binding [*ns* (-> ontos ~name :ns)]
-     ~@body))
-
 (defn onto-get
-  [st]
-  (with-onto :operations
-    (tawny.owl/entity-for-iri (IRI/create (str onto-base st)))))
+  [frag]
+  (if-let [[onto-str term] (re-matches #"^(\w+)\#(\w+)$" frag)]
+    (let [onto-map (get @ontos (keyword onto-str))
+          onto (:onto onto-map)
+          iri  (:iri onto-map)]
+      (if-let [found (towl/entity-for-iri onto (towl/iri (str iri term)))]
+        found
+        (log/warn "Could not find term" frag)))
+    (log/warn "Badly formed IRI fragment")))
 
 ;;; https://stackoverflow.com/questions/47394033/does-autoirimapper-cannot-read-ontologies-from-ttl-files
 ;;; "At present AutoIRIMapper only supports functional syntax, manchester syntax and RDF/XML."
-;;; My experience is that they have to be RDF/XML and they have to be named .owl !!!
 (defn add-mapper
   "Find onto file locally in resources directory."
   []
-  (let [folder (clojure.java.io/file "resources")
+  (let [folder (io/file "resources")
         mapper (AutoIRIMapper. folder true)]
-    (with-onto :modeling
-      (-> (tawny.owl/owl-ontology-manager)
-          .getIRIMappers
-          (.add (vector mapper))))))
+    (-> (towl/owl-ontology-manager)
+        .getIRIMappers
+        (.add (vector mapper)))))
 
 (defn my-intern-owl
-  "Like tawny.owl/intern-owl, but interns in the current package, no hooks though.
+  "Like towl/intern-owl, but interns in the current package, no hooks though.
    sym is a symbol."
   [sym entity]
   (let [var (intern *ns* sym entity)]
@@ -129,39 +95,60 @@
     var))
 
 (defn intern-subclasses
-  "Intern all the sublasses of the argument Entity, whereever they are."
+  "Intern all the sublasses of the argument Entity, wherever they are."
   [ent]
   (loop [onames (map key ontos)]
-    (when-let [oname (first onames)]
-      (with-onto oname
-        (let [o (tawny.owl/get-current-ontology)]
-          (doall (map #(my-intern-owl (-> % .toString iri-frag symbol) %)
-                      (tawny.owl/subclasses o ent)))))
-      (when-not (empty? onames)
-        (recur (rest onames))))))
+    (when-let [_oname (first onames)]
+      (let [o (towl/get-current-ontology)]
+        (doall (map #(my-intern-owl (-> % .toString iri-frag symbol) %)
+                    (towl/subclasses o ent)))))
+    (when-not (empty? onames)
+      (recur (rest onames)))))
 
-(defn load-onto
-  "Load an ontology. The argument is a keyword from the ontos map."
-  [oname]
-  (with-onto oname
-    (add-mapper)
-    (tawny.owl/remove-ontology-maybe
-     (OWLOntologyID. (IRI/create (-> ontos oname :iri))))
-    (tawny.owl/ontology-to-namespace
-     (-> ontos oname :ns)
-     (.loadOntologyFromOntologyDocument
-      (tawny.owl/owl-ontology-manager)
-      (IRI/create (clojure.java.io/resource (-> ontos oname :file)))))))
+(defn clear-ontos!
+  "Remove all the ontologies"
+  []
+  (repeatedly
+   5 ; POD 5 times!
+   (fn []           
+     (doall (map #(towl/remove-ontology-maybe (OWLOntologyID. (towl/iri %)))
+                 (map :iri (-> ontos deref vals)))))))
 
+(defn load-onto-files!
+  "Load ontologies, returning a map of them."
+  []
+  {:dtype {:onto (rtowl/read :iri "http://www.linkedmodel.org/schema/dtype"
+                             :namespace onto-ns
+                             :location (clojure.java.io/file "resources/dtype.owl"))
+           :iri "http://www.linkedmodel.org/schema/dtype"}
+   :vaem  {:onto (rtowl/read :iri "http://www.linkedmodel.org/schema/vaem"
+                             :namespace onto-ns
+                             :location (clojure.java.io/file "resources/vaem.owl"))
+           :iri "http://www.linkedmodel.org/schema/vaem"}
+   :qudt  {:onto (rtowl/read :iri "http://qudt.org/2.0/schema/qudt"
+                             :namespace onto-ns
+                             :location (clojure.java.io/file "resources/SCHEMA_QUDT-v2.0.ttl"))
+           :iri "http://qudt.org/2.0/schema/qudt"}
+   :modeling {:onto (rtowl/read :iri "http://modelmeth.nist.gov/modeling"
+                                :namespace onto-ns
+                                :location (clojure.java.io/file "resources/modeling.ttl")) ; The .owl has a bug
+              :iri "http://modelmeth.nist.gov/modeling"}
+   ;; A few things interned (process
+   :operations {:onto (rtowl/read :iri "http://modelmeth.nist.gov/operations"
+                                  :namespace onto-ns
+                                  :location (clojure.java.io/file "resources/operations.owl"))
+                :iri "http://modelmeth.nist.gov/operations#"}})
+ 
 (defn load-ontos
   "Load all the project ontologies."
   []
-  (doall (map load-onto (keys ontos)))
-  (with-onto :operations
-    ;(intern-subclasses (onto-get "modeling#Physical")) ; POD now that things are working...
-    ;(intern-subclasses (onto-get "modeling#Abstract")) ; ...do I care to intern?
-    (tawny.owl/owl-import 
-     (tawny.owl/ontology-for-namespace (-> ontos :modeling :ns)))))
+  (clear-ontos!)
+  (reset! ontos (load-onto-files!))
+  (intern-subclasses (onto-get "modeling#Physical")) ; POD now that things are working...  2021 these two were commented. 
+  (intern-subclasses (onto-get "modeling#Abstract")) ; ...do I care to intern?
+  (towl/owl-import 
+   (towl/ontology-for-namespace onto-ns))
+  true)
     
 (defn onto-ref
   "Safely dereference a symbol to an ontology entry. Works after things are interned!"
@@ -183,7 +170,7 @@
 (defn ignore?
   "Returns true if the tawny thing has a clojure {:priority :ignore}"
   [obj]
-  (if (some #(= (tawny.owl/guess-type (tawny.owl/get-current-ontology) obj) %) tawny-types)
+  (if (some #(= (towl/guess-type (towl/get-current-ontology) obj) %) tawny-types)
     (when-let [code (clojure-code obj)]
       (= :ignore (:priority (read-string code))))
     true))
@@ -191,14 +178,14 @@
 (defn more-specific?
   "Compare owl classes"
   [x y]
-  (cond ((tawny.owl/subclasses y) x) -1 
+  (cond ((towl/subclasses y) x) -1 
         (= x y) 0
         :else 1))
 
 (defn more-general?
   "Compare owl classes"
   [x y]
-  (cond ((tawny.owl/superclasses y) x) -1 
+  (cond ((towl/superclasses y) x) -1 
         (= x y) 0
         :else 1))
 
@@ -299,13 +286,11 @@
   "Respond with a table containing system and modeling concepts each in a column."
   [request]
   (app-page-wrapper {:tab :system}
-    (let [ops (with-onto :operations
-                (->> "operations#OperationsDomainConcept"
-                     onto-get
-                     tawny.owl/subclasses
-                     (sort #(let [name1 (-> %1 .getIRI .getShortForm)
-                                  name2 (-> %2 .getIRI .getShortForm)]
-                              (compare name1 name2)))))]
+    (let [ops (->> (onto-get "operations#OperationsDomainConcept")
+                   towl/subclasses
+                   (sort #(let [name1 (-> %1 .getIRI .getShortForm)
+                                name2 (-> %2 .getIRI .getShortForm)]
+                            (compare name1 name2))))]
       (html
        [:h1 "Production System and Modeling Concepts"]
        `[:table {:width "60%"}
@@ -315,7 +300,7 @@
 
 (defn- search-pg
   "Handle page for search tab."
-  [request]
+  [_request]
   (app-page-wrapper {:tab :search}
                     "All: Nothing here yet."))
 
@@ -328,7 +313,7 @@
 
 (defn lookup-concept
   "Return a map of everything we know about whatever."
-  [name]
+  [_name]
   :nyi)
 
 (defn simplify-tawny-annotations
@@ -369,8 +354,8 @@
        (as-> (apply hash-map (tawny.render/as-form obj :keyword true)) ?map
          (assoc ?map :label sname) ; POD (or label)
          (assoc ?map :notes (simplify-tawny-annotations (:annotation ?map)))
-         (assoc ?map :direct-subclasses (tawny.owl/direct-subclasses obj))
-         (assoc ?map :superclasses (vec (sort more-specific? (tawny.owl/superclasses obj))))
+         (assoc ?map :direct-subclasses (towl/direct-subclasses obj))
+         (assoc ?map :superclasses (vec (sort more-specific? (towl/superclasses obj))))
          (assoc ?map :properties (properties-of ?map property-map)))))))
 
 (defn- concept-desc-pg
@@ -384,8 +369,8 @@
                            (url-decode q)))))
 
 (defroutes routes
-  (GET "/" [] system-pg)
-  (GET "/Facility/:tab" [tab] 
+  ;(GET "/" [] system-pg) ; POD investigte
+  (GET "/facility/:tab" [tab] 
        (cond (= tab "list"  ) list-pg
              (= tab "concepts") concept-desc-pg
              (= tab "search" ) search-pg))
@@ -402,16 +387,11 @@
     (merge {"host" (env :demo-web-host), "port" (env :demo-web-port)}
            args)))
 
-;;; (Re)start the server
-(defn restart []
- (web/stop (-main :port 3034))
-  (-main :port 3034))
-
-;;;================== /Facility/concepts?name=foo =====================================
+;;;================== /facility/concepts?name=foo =====================================
 ;;; POD rewrite with reduce
 (defn- table-vals
-  [text]
   "Returns vector of table rows (list of the row's elements) if TEXT (vector of strings) start a table."
+  [text]
   (when (re-matches #"^\s*\|[-,:,\|]+\|.*\n$" (text 0)) ; second line of markdown table is just |------|
     (let [len (dec (count text))]
       (loop [line-num 1
@@ -423,3 +403,12 @@
            (conj rows (butlast (rest (str/split (text line-num) #"\|")))))
           rows)))))
 
+;;; (Re)start the server
+(defn restart-web-server []
+ (web/stop (-main :port 3034))
+  (-main :port 3034))
+
+(defstate facility
+  :start
+  (do (load-ontos)
+      (restart-web-server)))
